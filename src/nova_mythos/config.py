@@ -14,6 +14,7 @@ class ModelConfig:
     device: str = "cuda:0"
     dtype: str = "bfloat16"
     max_loop_iters: Optional[int] = None  # None = use variant default
+    vocab_size: Optional[int] = None      # None = use variant default
 
 
 @dataclass

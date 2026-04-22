@@ -89,9 +89,10 @@ class NovaMythosBackend:
 
         mythos_cfg = _VARIANTS[variant_name]()
 
-        # Override loop count if explicitly configured
         if self._config.model.max_loop_iters is not None:
             mythos_cfg.max_loop_iters = self._config.model.max_loop_iters
+        if self._config.model.vocab_size is not None:
+            mythos_cfg.vocab_size = self._config.model.vocab_size
 
         self._n_loops = mythos_cfg.max_loop_iters
 

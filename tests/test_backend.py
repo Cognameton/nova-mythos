@@ -14,7 +14,7 @@ from nova_mythos.backend import NovaMythosBackend, GenerationRequest
 @pytest.fixture
 def cpu_backend():
     cfg = NovaMythosConfig(
-        model=ModelConfig(variant="1b", checkpoint_path=None, device="cpu", dtype="float32"),
+        model=ModelConfig(variant="1b", checkpoint_path=None, device="cpu", dtype="float32", vocab_size=50257),
         generation=GenerationConfig(max_new_tokens=8),
         tokenizer=TokenizerConfig(name="gpt2"),
     )
