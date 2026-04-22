@@ -1,0 +1,74 @@
+NOVA-MYTHOS — PHASE 1: FOUNDATION
+==================================
+Status: IN PROGRESS (started 2026-04-22)
+
+MISSION
+-------
+Scaffold the nova-mythos project: vendor OpenMythos architecture, establish
+project structure, define the integration seam with Nova 2.0, and make the
+1B model loadable on hardware.
+
+This phase produces infrastructure only. No trained weights. No Nova 2.0
+runtime integration. No training runs.
+
+
+ARCHITECTURE OVERVIEW
+---------------------
+Nova 2.0 defines an InferenceBackend protocol (5 methods):
+    load(), unload(), metadata(), tokenize(), generate()
+
+LlamaCppBackend is the current implementation (GGUF + llama-cpp-python).
+NovaMythosBackend will be the new implementation (PyTorch RDT).
+
+The two projects remain decoupled at import time. Nova 2.0 types are
+mirrored locally in backend.py rather than imported cross-project.
+
+
+OBJECTIVES
+----------
+1. Initialize git repository on main branch
+2. Scaffold directory structure (src, tests, configs, docs, checkpoints)
+3. Vendor OpenMythos source (MIT) into src/nova_mythos/model/
+   - architecture.py  (from OpenMythos main.py)
+   - variants.py
+   - tokenizer.py
+4. Write config.py (NovaMythosConfig dataclass, load_config())
+5. Write backend.py (NovaMythosBackend skeleton — full impl in Phase 3)
+6. Write test_hardware.py (Phase 2 gate: VRAM budget, forward pass)
+7. Write test_backend.py (Phase 3 gate: protocol compliance)
+8. Write pyproject.toml and .gitignore
+9. Write nova_mythos.default.yaml
+
+
+STAGES
+------
+1.1  git init, branch main
+1.2  directory scaffold
+1.3  vendor OpenMythos (architecture, variants, tokenizer)
+1.4  config.py
+1.5  backend.py skeleton
+1.6  tests skeleton
+1.7  project metadata files
+
+
+EXIT CRITERIA
+-------------
+- [ ] Directory structure matches plan
+- [ ] OpenMythos source vendored and importable
+- [ ] NovaMythosConfig loads from nova_mythos.default.yaml
+- [ ] NovaMythosBackend instantiates without error (no checkpoint required)
+- [ ] test_backend.py runs (CPU, random weights) — all pass
+- [ ] test_hardware.py exists and is ready for Phase 2 execution
+
+
+WHAT THIS PHASE DOES NOT DO
+----------------------------
+- Does not train a model
+- Does not require a checkpoint to exist
+- Does not modify nova2.0 source
+- Does not push to GitHub (user action)
+
+
+NEXT: PHASE 2 — Hardware Validation
+Run test_hardware.py on CUDA device. Verify 1B fits in 12GB VRAM.
+Gate on success before Phase 3 backend implementation.

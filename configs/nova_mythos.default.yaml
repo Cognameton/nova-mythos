@@ -1,0 +1,20 @@
+model:
+  variant: 1b
+  checkpoint_path: ./checkpoints/nova_mythos_1b.safetensors
+  device: cuda:0
+  dtype: bfloat16
+
+  # RDT loop settings (overrides variant defaults if set)
+  # max_loop_iters: 16
+
+generation:
+  max_new_tokens: 512
+  temperature: 0.7
+  top_p: 0.9
+  stop_sequences:
+    - "User:"
+    - "user:"
+
+tokenizer:
+  # HuggingFace tokenizer id — change once a custom vocab is trained
+  name: gpt2
