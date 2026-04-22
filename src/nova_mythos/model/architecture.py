@@ -241,8 +241,8 @@ class GQAttention(nn.Module):
         scale = self.head_dim**-0.5
         attn = torch.matmul(q, k.transpose(-2, -1)) * scale
         if mask is not None:
-            attn = attn + mask
-        attn = self.attn_drop(F.softmax(attn, dim=-1))
+            attn = attn + mask.to(dtype=attn.dtype)
+        attn = self.attn_drop(F.softmax(attn, dim=-1).to(dtype=q.dtype))
         out = torch.matmul(attn, v)
         out = out.transpose(1, 2).contiguous().view(B, T, -1)
         return self.wo(out)
@@ -383,8 +383,8 @@ class MLAttention(nn.Module):
         scale = self.q_head_dim**-0.5
         attn = torch.matmul(q, k.transpose(-2, -1)) * scale
         if mask is not None:
-            attn = attn + mask
-        attn = self.attn_drop(F.softmax(attn, dim=-1))
+            attn = attn + mask.to(dtype=attn.dtype)
+        attn = self.attn_drop(F.softmax(attn, dim=-1).to(dtype=q.dtype))
         out = torch.matmul(attn, v)  # (B, H, T, v_dim)
         out = out.transpose(1, 2).contiguous().view(B, T, -1)
         return self.wo(out)
@@ -823,7 +823,7 @@ class RecurrentBlock(nn.Module):
         B, T, D = h.shape
 
         halted = torch.zeros(B, T, device=h.device, dtype=torch.bool)
-        cumulative_p = torch.zeros(B, T, device=h.device)
+        cumulative_p = torch.zeros(B, T, device=h.device, dtype=h.dtype)
         h_out = torch.zeros_like(h)
 
         for t in range(n_loops):
@@ -848,10 +848,10 @@ class RecurrentBlock(nn.Module):
                 remainder,
                 p,
             )
-            weight = weight * still_running.float()
+            weight = weight * still_running.to(dtype=h.dtype)
             h_out = h_out + weight.unsqueeze(-1) * h
 
-            cumulative_p = cumulative_p + p * still_running.float()
+            cumulative_p = cumulative_p + p * still_running.to(dtype=h.dtype)
             halted = halted | (cumulative_p >= self.cfg.act_threshold)
 
             # Only short-circuit when there is no KV cache to keep consistent.

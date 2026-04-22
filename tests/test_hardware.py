@@ -21,7 +21,18 @@ def backend_1b():
         tokenizer=TokenizerConfig(name="gpt2"),
     )
     backend = NovaMythosBackend(cfg)
+    # gpt2 vocab=50257; patch model vocab to match before load
+    # (hardware test only — trained weights will use a matched tokenizer)
+    from nova_mythos.model.variants import mythos_1b
+    _orig_1b = mythos_1b
+    def _patched_1b():
+        c = _orig_1b()
+        c.vocab_size = 50257
+        return c
+    import nova_mythos.model.variants as _vmod
+    _vmod.mythos_1b = _patched_1b
     backend.load()
+    _vmod.mythos_1b = _orig_1b
     yield backend
     backend.unload()
 
@@ -72,9 +83,16 @@ def test_tokenize(backend_1b):
 def test_unload_clears_cache():
     cfg = NovaMythosConfig(
         model=ModelConfig(variant="1b", checkpoint_path=None, device="cuda:0"),
+        tokenizer=TokenizerConfig(name="gpt2"),
     )
     backend = NovaMythosBackend(cfg)
+    import nova_mythos.model.variants as _vmod
+    from nova_mythos.model.variants import mythos_1b as _orig
+    def _patched():
+        c = _orig(); c.vocab_size = 50257; return c
+    _vmod.mythos_1b = _patched
     backend.load()
+    _vmod.mythos_1b = _orig
     assert backend.metadata()["loaded"] is True
     backend.unload()
     assert backend.metadata()["loaded"] is False

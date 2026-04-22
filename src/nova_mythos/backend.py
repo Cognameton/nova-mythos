@@ -66,8 +66,6 @@ class NovaMythosBackend:
         """Instantiate model and tokenizer, move to target device."""
         import torch
         from nova_mythos.model import OpenMythos, MythosTokenizer
-        from nova_mythos.model.variants import _VARIANTS
-
         from nova_mythos.model.variants import (
             mythos_1b, mythos_3b, mythos_10b, mythos_50b,
             mythos_100b, mythos_500b, mythos_1t,
@@ -95,6 +93,8 @@ class NovaMythosBackend:
         if self._config.model.max_loop_iters is not None:
             mythos_cfg.max_loop_iters = self._config.model.max_loop_iters
 
+        self._n_loops = mythos_cfg.max_loop_iters
+
         dtype = getattr(torch, self._config.model.dtype)
         self._device = torch.device(self._config.model.device)
 
@@ -115,6 +115,7 @@ class NovaMythosBackend:
         import torch
         self._model = None
         self._tokenizer = None
+        self._n_loops = None
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -168,8 +169,9 @@ class NovaMythosBackend:
             output_ids = self._model.generate(
                 input_tensor,
                 max_new_tokens=request.max_tokens,
+                n_loops=self._n_loops,
                 temperature=request.temperature,
-                top_p=request.top_p,
+                top_k=50,  # model uses top_k; top_p not supported natively
             )
 
         elapsed = time.perf_counter() - t0
