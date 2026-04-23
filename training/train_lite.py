@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """
-Train nova-mythos lite (93.5M) on FineWeb-Edu sample-10BT.
+Train nova-mythos lite (93.5M).
+
+Datasets:
+    fineweb   -- FineWeb-Edu sample-10BT, streamed from HuggingFace (default)
+    corpus    -- Local binary dataset prepared by prepare_corpus.py
+    mixed     -- Corpus interleaved with FineWeb-Edu at a configurable ratio
 
 Single GPU:
     python training/train_lite.py --output-dir runs/lite-001
@@ -9,13 +14,26 @@ Multi-GPU (both cards):
     .venv/bin/torchrun --nproc_per_node=2 training/train_lite.py \
         --output-dir runs/lite-001
 
+Local corpus only:
+    .venv/bin/torchrun --nproc_per_node=2 training/train_lite.py \
+        --output-dir runs/corpus-001 \
+        --dataset corpus \
+        --corpus-path data/corpus/corpus.bin
+
+Mixed (10% corpus, 90% FineWeb-Edu):
+    .venv/bin/torchrun --nproc_per_node=2 training/train_lite.py \
+        --output-dir runs/mixed-001 \
+        --dataset mixed \
+        --corpus-path data/corpus/corpus.bin \
+        --corpus-ratio 0.1
+
 Resume from latest checkpoint:
     .venv/bin/torchrun --nproc_per_node=2 training/train_lite.py \
         --output-dir runs/lite-001 --resume
 
 Hardware target: dual RTX 3060 12GB
 Best config from benchmark: seq=512 mb=8 acc=4 → 11.4k global tok/s
-10B token run ≈ 10 days, 100B ≈ 100 days
+10B token run ≈ 10 days on FineWeb-Edu
 """
 
 import argparse
@@ -110,6 +128,84 @@ class FineWebDataset(IterableDataset):
 
 
 # ---------------------------------------------------------------------------
+# Local corpus dataset (from prepare_corpus.py binary output)
+# ---------------------------------------------------------------------------
+
+class CorpusDataset(IterableDataset):
+    """Reads a flat uint16 binary corpus file and yields packed (x, y) pairs.
+
+    The binary file is a flat array of token IDs written by prepare_corpus.py.
+    Documents are separated by EOS tokens — the dataset streams sequentially
+    through the file, wrapping back to the start when exhausted.
+
+    With multiple ranks each rank starts at a different offset so they see
+    different data within each epoch.
+    """
+
+    def __init__(self, bin_path: Path, seq_len: int, rank: int, world_size: int):
+        self.bin_path   = Path(bin_path)
+        self.seq_len    = seq_len
+        self.rank       = rank
+        self.world_size = world_size
+
+    def __iter__(self):
+        import numpy as np
+        data = np.fromfile(self.bin_path, dtype=np.uint16).astype(np.int64)
+        n    = len(data)
+
+        # Each rank starts at a different position so they don't overlap
+        offset = (self.rank * (n // self.world_size)) % n
+
+        while True:
+            start = offset
+            end   = start + self.seq_len + 1
+            if end > n:
+                # wrap around
+                chunk = np.concatenate([data[start:], data[: end - n]])
+            else:
+                chunk = data[start: end]
+            offset = (offset + self.seq_len + 1) % n
+            yield (
+                torch.tensor(chunk[:-1], dtype=torch.long),
+                torch.tensor(chunk[1:],  dtype=torch.long),
+            )
+
+
+# ---------------------------------------------------------------------------
+# Mixed dataset — interleaves corpus and FineWeb-Edu at a given ratio
+# ---------------------------------------------------------------------------
+
+class MixedDataset(IterableDataset):
+    """Yields from CorpusDataset with probability `corpus_ratio`,
+    otherwise from FineWebDataset.  Mixing is per-batch, not per-token,
+    so the actual ratio is approximate but consistent over long runs."""
+
+    def __init__(
+        self,
+        corpus_path: Path,
+        seq_len: int,
+        rank: int,
+        world_size: int,
+        corpus_ratio: float = 0.1,
+        seed: int = 42,
+    ):
+        self.corpus  = CorpusDataset(corpus_path, seq_len, rank, world_size)
+        self.fineweb = FineWebDataset(seq_len, rank, world_size, seed)
+        self.corpus_ratio = corpus_ratio
+
+    def __iter__(self):
+        import random
+        rng         = random.Random(42)
+        corpus_iter = iter(self.corpus)
+        fw_iter     = iter(self.fineweb)
+        while True:
+            if rng.random() < self.corpus_ratio:
+                yield next(corpus_iter)
+            else:
+                yield next(fw_iter)
+
+
+# ---------------------------------------------------------------------------
 # LR schedule: linear warmup → cosine decay
 # ---------------------------------------------------------------------------
 
@@ -191,6 +287,13 @@ def parse_args():
     p.add_argument("--save-every",        type=int,   default=SAVE_EVERY)
     p.add_argument("--keep-checkpoints",  type=int,   default=KEEP_CHECKPOINTS)
     p.add_argument("--seed",              type=int,   default=42)
+    p.add_argument("--dataset",           default="fineweb",
+                   choices=["fineweb", "corpus", "mixed"],
+                   help="fineweb=FineWeb-Edu stream, corpus=local binary, mixed=both")
+    p.add_argument("--corpus-path",       type=Path,  default=None,
+                   help="Path to corpus.bin from prepare_corpus.py (required for corpus/mixed)")
+    p.add_argument("--corpus-ratio",      type=float, default=0.1,
+                   help="Fraction of batches drawn from corpus in mixed mode (default 0.1)")
     return p.parse_args()
 
 
@@ -219,9 +322,16 @@ def main():
     global_batch = args.seq_len * args.micro_batch * args.grad_accum * world_size
 
     if master:
+        dataset_desc = args.dataset
+        if args.dataset == "mixed":
+            dataset_desc = f"mixed ({args.corpus_ratio:.0%} corpus + {1-args.corpus_ratio:.0%} FineWeb-Edu)"
+        elif args.dataset == "corpus":
+            dataset_desc = f"corpus ({args.corpus_path})"
+
         print(f"\nnova-mythos Lite Training")
         print(f"{'='*60}")
         print(f"  Output dir   : {args.output_dir}")
+        print(f"  Dataset      : {dataset_desc}")
         print(f"  GPUs         : {world_size}")
         print(f"  Global batch : {global_batch:,} tokens/step")
         print(f"  Total steps  : {args.total_steps:,}")
@@ -265,12 +375,27 @@ def main():
                 print(f"Resumed at step {start_step:,}\n")
 
     # --- data ---
-    dataset = FineWebDataset(
-        seq_len=args.seq_len,
-        rank=rank,
-        world_size=world_size,
-        seed=args.seed,
-    )
+    if args.dataset == "fineweb":
+        dataset = FineWebDataset(
+            seq_len=args.seq_len, rank=rank,
+            world_size=world_size, seed=args.seed,
+        )
+    elif args.dataset == "corpus":
+        if args.corpus_path is None:
+            raise ValueError("--corpus-path required when --dataset=corpus")
+        dataset = CorpusDataset(
+            bin_path=args.corpus_path, seq_len=args.seq_len,
+            rank=rank, world_size=world_size,
+        )
+    else:  # mixed
+        if args.corpus_path is None:
+            raise ValueError("--corpus-path required when --dataset=mixed")
+        dataset = MixedDataset(
+            corpus_path=args.corpus_path, seq_len=args.seq_len,
+            rank=rank, world_size=world_size,
+            corpus_ratio=args.corpus_ratio, seed=args.seed,
+        )
+
     loader = DataLoader(dataset, batch_size=args.micro_batch, num_workers=0)
 
     loss_fn = nn.CrossEntropyLoss()

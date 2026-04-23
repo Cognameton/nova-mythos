@@ -15,3 +15,4 @@ dist/
 build/
 *.egg-info/
 .pytest_cache/
+data/corpus/
