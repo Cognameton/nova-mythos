@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-Training throughput benchmark for the nova-mythos 1B model.
+Training throughput benchmark for the nova-mythos lite (~160M) model.
 
 Uses synthetic (random token) data — no dataset download needed.
-Sweeps batch configs with both AdamW (fp32) and 8-bit Adam (bitsandbytes)
-to find the viable sweet spot on dual RTX 3060 12GB.
+Sweeps batch configs with AdamW (fp32) to find the performance sweet spot
+on dual RTX 3060 12GB.  Unlike the 1B benchmark, no bitsandbytes needed:
+the lite variant fits comfortably with standard AdamW.
 
 Single GPU:
-    python training/benchmark_1b.py
+    python training/benchmark_lite.py
 
 Multi-GPU (both cards):
-    torchrun --nproc_per_node=2 training/benchmark_1b.py
+    torchrun --nproc_per_node=2 training/benchmark_lite.py
 """
 
 import json
@@ -24,17 +25,12 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.distributed as dist
-from torch.distributed.fsdp import (
-    FullyShardedDataParallel as FSDP,
-    ShardingStrategy,
-    MixedPrecision,
-)
-from torch.distributed.fsdp.wrap import ModuleWrapPolicy
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from nova_mythos.model.architecture import OpenMythos, TransformerBlock, RecurrentBlock
-from nova_mythos.model.variants import mythos_1b
+from nova_mythos.model.variants import mythos_lite
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -42,7 +38,7 @@ from nova_mythos.model.variants import mythos_1b
 
 WARMUP_STEPS  = 3
 MEASURE_STEPS = 10
-TARGET_TOKENS = 100_000_000_000   # 100B token training target
+TARGET_TOKENS = 10_000_000_000    # 10B token training target (FineWeb-Edu sample-10BT)
 VOCAB_SIZE    = 50257
 
 # ---------------------------------------------------------------------------
@@ -55,34 +51,36 @@ class BenchConfig:
     micro_batch: int
     grad_accum: int
     grad_checkpointing: bool = False
-    use_bnb: bool = False           # 8-bit Adam via bitsandbytes
 
     @property
     def label(self) -> str:
-        gc  = "+gc " if self.grad_checkpointing else "    "
-        opt = "bnb8" if self.use_bnb else "adam"
-        return f"seq={self.seq_len:<5} mb={self.micro_batch} acc={self.grad_accum:<2} {gc} {opt}"
+        gc = "+gc " if self.grad_checkpointing else "    "
+        return f"seq={self.seq_len:<5} mb={self.micro_batch:<2} acc={self.grad_accum:<2} {gc}"
 
 
-# AdamW (fp32) configs — likely OOM on both GPUs, kept for reference
-ADAMW_CONFIGS = [
-    BenchConfig(seq_len=512,  micro_batch=2, grad_accum=8),
-    BenchConfig(seq_len=512,  micro_batch=2, grad_accum=8, grad_checkpointing=True),
+# Single GPU — seq=512/1024 fit without GC; seq=2048+ needs mb=1 or GC
+# (quadratic attention memory across 8 recurrent iterations limits long sequences)
+SINGLE_GPU_CONFIGS = [
+    BenchConfig(seq_len=512,  micro_batch=8,  grad_accum=4),
+    BenchConfig(seq_len=1024, micro_batch=4,  grad_accum=4),
+    BenchConfig(seq_len=2048, micro_batch=1,  grad_accum=8),
+    BenchConfig(seq_len=2048, micro_batch=2,  grad_accum=4, grad_checkpointing=True),
+    BenchConfig(seq_len=4096, micro_batch=1,  grad_accum=8, grad_checkpointing=True),
 ]
 
-# 8-bit Adam configs — target for dual RTX 3060
-BNB_CONFIGS = [
-    BenchConfig(seq_len=512,  micro_batch=4, grad_accum=8,  use_bnb=True),
-    BenchConfig(seq_len=512,  micro_batch=4, grad_accum=8,  grad_checkpointing=True, use_bnb=True),
-    BenchConfig(seq_len=1024, micro_batch=2, grad_accum=8,  use_bnb=True),
-    BenchConfig(seq_len=1024, micro_batch=2, grad_accum=8,  grad_checkpointing=True, use_bnb=True),
-    BenchConfig(seq_len=2048, micro_batch=1, grad_accum=8,  use_bnb=True),
-    BenchConfig(seq_len=2048, micro_batch=1, grad_accum=8,  grad_checkpointing=True, use_bnb=True),
-    BenchConfig(seq_len=2048, micro_batch=2, grad_accum=4,  grad_checkpointing=True, use_bnb=True),
-    BenchConfig(seq_len=2048, micro_batch=4, grad_accum=4,  grad_checkpointing=True, use_bnb=True),
+# Dual GPU — FSDP saves ~0.65 GB on static; activations unchanged so same seq limits apply.
+# GC is needed for seq>=2048 with any meaningful batch size.
+DUAL_GPU_CONFIGS = [
+    BenchConfig(seq_len=512,  micro_batch=8,  grad_accum=4),
+    BenchConfig(seq_len=512,  micro_batch=16, grad_accum=4),
+    BenchConfig(seq_len=1024, micro_batch=4,  grad_accum=4),
+    BenchConfig(seq_len=1024, micro_batch=8,  grad_accum=4),
+    BenchConfig(seq_len=2048, micro_batch=1,  grad_accum=8),
+    BenchConfig(seq_len=2048, micro_batch=2,  grad_accum=4, grad_checkpointing=True),
+    BenchConfig(seq_len=2048, micro_batch=4,  grad_accum=4, grad_checkpointing=True),
+    BenchConfig(seq_len=4096, micro_batch=1,  grad_accum=8, grad_checkpointing=True),
+    BenchConfig(seq_len=4096, micro_batch=2,  grad_accum=4, grad_checkpointing=True),
 ]
-
-ALL_CONFIGS = ADAMW_CONFIGS + BNB_CONFIGS
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -106,16 +104,6 @@ def apply_grad_checkpointing(model: nn.Module) -> None:
     )
 
 
-def build_optimizer(model: nn.Module, use_bnb: bool) -> torch.optim.Optimizer:
-    if use_bnb:
-        import bitsandbytes as bnb
-        return bnb.optim.Adam8bit(model.parameters(), lr=3e-4, weight_decay=0.1)
-    return torch.optim.AdamW(
-        model.parameters(), lr=3e-4, weight_decay=0.1,
-        fused=torch.cuda.is_available(),
-    )
-
-
 # ---------------------------------------------------------------------------
 # Result
 # ---------------------------------------------------------------------------
@@ -127,7 +115,6 @@ class BenchResult:
     micro_batch: int
     grad_accum: int
     grad_checkpointing: bool
-    use_bnb: bool
     world_size: int
     global_tokens_per_step: int
     mean_step_ms: float
@@ -135,7 +122,7 @@ class BenchResult:
     tokens_per_sec: float
     peak_vram_gb: float
     oom: bool
-    estimated_days_100b: float
+    estimated_days_10b: float
     note: str = ""
 
     def row(self) -> str:
@@ -146,7 +133,7 @@ class BenchResult:
             f"{self.mean_step_ms:7.0f}ms ±{self.std_step_ms:5.0f}  "
             f"{self.tokens_per_sec/1000:7.1f}k tok/s  "
             f"VRAM {self.peak_vram_gb:.2f}GB  "
-            f"~{self.estimated_days_100b:.1f}d"
+            f"~{self.estimated_days_10b:.1f}d"
         )
 
 
@@ -169,37 +156,29 @@ def run_config(
         micro_batch=cfg.micro_batch,
         grad_accum=cfg.grad_accum,
         grad_checkpointing=cfg.grad_checkpointing,
-        use_bnb=cfg.use_bnb,
         world_size=world_size,
         global_tokens_per_step=cfg.seq_len * cfg.micro_batch * cfg.grad_accum * world_size,
     )
 
     try:
-        model_cfg = mythos_1b()
+        model_cfg = mythos_lite()
         model_cfg.vocab_size = VOCAB_SIZE
         model = OpenMythos(model_cfg)
 
+        model = model.to(device=device, dtype=torch.bfloat16)
+        if cfg.grad_checkpointing:
+            apply_grad_checkpointing(model)
         if ddp:
-            mp = MixedPrecision(
-                param_dtype=torch.bfloat16,
-                reduce_dtype=torch.bfloat16,
-                buffer_dtype=torch.bfloat16,
-            )
-            model = FSDP(
-                model,
-                sharding_strategy=ShardingStrategy.FULL_SHARD,
-                mixed_precision=mp,
-                auto_wrap_policy=ModuleWrapPolicy({TransformerBlock, RecurrentBlock}),
-                device_id=local_rank,
-            )
-            if cfg.grad_checkpointing:
-                apply_grad_checkpointing(model)
-        else:
-            model = model.to(device=device, dtype=torch.bfloat16)
-            if cfg.grad_checkpointing:
-                apply_grad_checkpointing(model)
+            # DDP is correct for 93.5M model: full copy on each GPU, gradient
+            # all-reduce only once per backward.  FSDP's per-module all-gathers
+            # interact badly with the RecurrentBlock's ACT loop and are
+            # unnecessary since the model fits easily in 12 GB.
+            model = DDP(model, device_ids=[local_rank])
 
-        optimizer = build_optimizer(model, cfg.use_bnb)
+        optimizer = torch.optim.AdamW(
+            model.parameters(), lr=3e-4, weight_decay=0.1,
+            fused=torch.cuda.is_available(),
+        )
         loss_fn = nn.CrossEntropyLoss()
 
         torch.cuda.reset_peak_memory_stats(local_rank)
@@ -247,7 +226,7 @@ def run_config(
             tokens_per_sec=global_tps,
             peak_vram_gb=peak_vram_gb,
             oom=False,
-            estimated_days_100b=est_days,
+            estimated_days_10b=est_days,
         )
 
     except torch.cuda.OutOfMemoryError:
@@ -261,7 +240,7 @@ def run_config(
             **common,
             mean_step_ms=0, std_step_ms=0, tokens_per_sec=0,
             peak_vram_gb=12.0, oom=True,
-            estimated_days_100b=float("inf"), note="OOM",
+            estimated_days_10b=float("inf"), note="OOM",
         )
 
 
@@ -285,35 +264,43 @@ def main():
 
     master = rank == 0
 
+    configs = DUAL_GPU_CONFIGS if ddp else SINGLE_GPU_CONFIGS
+
     if master:
-        model_cfg = mythos_1b()
+        model_cfg = mythos_lite()
         model_cfg.vocab_size = VOCAB_SIZE
-        param_count = sum(p.numel() for p in OpenMythos(model_cfg).parameters())
-        del model_cfg
+        tmp_model = OpenMythos(model_cfg)
+        param_count = sum(p.numel() for p in tmp_model.parameters())
+        moe_params  = sum(p.numel() for n, p in tmp_model.named_parameters()
+                          if "expert" in n.lower())
+        del tmp_model, model_cfg
 
-        # Memory projection
-        per_gpu = lambda b: b / world_size
-        w_bf16  = param_count * 2 / 1e9
+        w_bf16    = param_count * 2 / 1e9
         adam_fp32 = param_count * 12 / 1e9
-        bnb_adam  = param_count * 2 / 1e9
-        allgather = param_count * 2 / 1e9
+        grad_buf  = param_count * 2 / 1e9   # DDP gradient bucket (bf16)
+        static    = w_bf16 + adam_fp32 + (grad_buf if world_size > 1 else 0)
+        headroom  = 12.0 - static
 
-        print(f"\nnova-mythos 1B Training Benchmark")
+        mode = "DDP" if world_size > 1 else "single GPU"
+        print(f"\nnova-mythos Lite Training Benchmark")
         print(f"{'='*72}")
-        print(f"  GPUs            : {world_size}x RTX 3060 12GB")
-        print(f"  Parameters      : {param_count/1e9:.3f}B  (84% in MoE experts)")
+        print(f"  GPUs            : {world_size}x RTX 3060 12GB  ({mode})")
+        print(f"  Parameters      : {param_count/1e6:.1f}M  ({moe_params/param_count:.0%} in MoE experts)")
         print(f"  Warmup / Measure: {WARMUP_STEPS} / {MEASURE_STEPS} steps")
-        print(f"  Target          : {TARGET_TOKENS/1e9:.0f}B tokens")
+        print(f"  Target          : {TARGET_TOKENS/1e9:.0f}B tokens (FineWeb-Edu sample-10BT)")
         print(f"")
-        print(f"  Memory projection per GPU ({world_size} GPU FSDP FULL_SHARD):")
-        print(f"    AdamW fp32  static : {per_gpu(w_bf16+adam_fp32):.2f} GB  peak: {per_gpu(w_bf16+adam_fp32)+allgather:.2f} GB  headroom: {12-per_gpu(w_bf16+adam_fp32)-allgather:.2f} GB")
-        print(f"    8-bit Adam  static : {per_gpu(w_bf16+bnb_adam):.2f} GB  peak: {per_gpu(w_bf16+bnb_adam)+allgather:.2f} GB  headroom: {12-per_gpu(w_bf16+bnb_adam)-allgather:.2f} GB")
+        print(f"  Memory per GPU ({mode}):")
+        print(f"    Weights (bf16)  : {w_bf16:.2f} GB")
+        print(f"    AdamW (fp32 m+v): {adam_fp32:.2f} GB")
+        if world_size > 1:
+            print(f"    DDP grad bucket : {grad_buf:.2f} GB")
+        print(f"    Static total    : {static:.2f} GB   headroom: {headroom:.2f} GB")
         print(f"{'='*72}\n")
 
     results = []
-    for i, cfg in enumerate(ALL_CONFIGS):
+    for i, cfg in enumerate(configs):
         if master:
-            print(f"  [{i+1}/{len(ALL_CONFIGS)}] {cfg.label} ...", flush=True)
+            print(f"  [{i+1}/{len(configs)}] {cfg.label} ...", flush=True)
 
         result = run_config(
             cfg=cfg, ddp=ddp, rank=rank,
@@ -337,12 +324,12 @@ def main():
             print(f"\n  Best config     : {best.label.strip()}")
             print(f"  Throughput      : {best.tokens_per_sec/1000:.1f}k global tok/s")
             print(f"  VRAM peak/GPU   : {best.peak_vram_gb:.2f} GB")
-            print(f"  Est. 100B tok   : ~{best.estimated_days_100b:.1f} days")
-            print(f"  Est. 10B tok    : ~{best.estimated_days_100b/10:.1f} days  (FineWeb-Edu sample-10BT)")
+            print(f"  Est. 10B tok    : ~{best.estimated_days_10b:.1f} days  (FineWeb-Edu sample-10BT)")
+            print(f"  Est. 100B tok   : ~{best.estimated_days_10b*10:.1f} days")
         else:
-            print("\n  All configs OOM'd — hardware cannot support 1B training at this scale.")
+            print("\n  All configs OOM'd — check architecture or reduce batch size.")
 
-        out = Path("benchmark_results.json")
+        out = Path("benchmark_lite_results.json")
         out.write_text(json.dumps([asdict(r) for r in results], indent=2))
         print(f"\n  Results saved   : {out}\n")
 

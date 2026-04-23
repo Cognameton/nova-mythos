@@ -6,6 +6,47 @@ from nova_mythos.model.architecture import MythosConfig
 # expert_dim is solved from the residual budget after all other terms.
 
 
+def mythos_lite() -> MythosConfig:
+    """~160M-param training-viable variant for dual RTX 3060 12GB.
+
+    Designed to train comfortably on 2× RTX 3060 12GB with standard AdamW (fp32).
+    Key reductions vs 1B:
+      - dim 2048→1024          (4× fewer attention params)
+      - n_experts 64→8         (8× fewer expert FFNs)
+      - expert_dim 2048→512    (4× smaller per-expert FFN)
+      - max_loop_iters 16→8   (half recurrent activation depth)
+      - n_experts_per_tok 4→2  (half expert activation breadth)
+
+    Memory target (2-way FSDP, AdamW fp32):
+      Static per GPU  ≈ 0.8 GB   (weights bf16 + optimizer fp32)
+      All-gather peak ≈ +0.3 GB
+      Headroom for activations ≈ 10.9 GB  ← comfortable for seq=4096 mb=4
+    """
+    return MythosConfig(
+        vocab_size=32000,
+        dim=1024,
+        n_heads=8,
+        n_kv_heads=2,
+        max_seq_len=4096,
+        max_loop_iters=8,
+        prelude_layers=2,
+        coda_layers=2,
+        attn_type="mla",
+        kv_lora_rank=128,
+        q_lora_rank=256,
+        qk_rope_head_dim=32,
+        qk_nope_head_dim=64,
+        v_head_dim=64,
+        n_experts=8,
+        n_shared_experts=2,
+        n_experts_per_tok=2,
+        expert_dim=512,
+        act_threshold=0.99,
+        rope_theta=500000.0,
+        lora_rank=4,
+    )
+
+
 def mythos_1b() -> MythosConfig:
     """1B parameter config. Small research/fine-tuning model. dim=2048, 64 experts, 16 loop iters, 4k context."""
     return MythosConfig(
