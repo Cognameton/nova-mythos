@@ -487,6 +487,7 @@ def main():
         print(f"Final checkpoint: {args.output_dir}/checkpoint-{step:07d}")
 
     if ddp:
+        dist.barrier()
         dist.destroy_process_group()
 
 
