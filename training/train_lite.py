@@ -346,7 +346,7 @@ def main():
     model = OpenMythos(model_cfg).to(device=device, dtype=torch.bfloat16)
 
     if ddp:
-        model = DDP(model, device_ids=[local_rank])
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
     # --- optimizer + scheduler ---
     optimizer = torch.optim.AdamW(
@@ -405,8 +405,9 @@ def main():
     step         = start_step
     tokens_seen  = step * global_batch
     running_loss = 0.0
-    t_step_start = time.perf_counter()
-    t_run_start  = time.perf_counter() - (step * global_batch / 11_400)  # approx offset on resume
+    t_step_start    = time.perf_counter()
+    t_run_start     = time.perf_counter()
+    steps_in_window = 0
 
     data_iter = iter(loader)
 
@@ -436,19 +437,22 @@ def main():
         optimizer.step()
         scheduler.step()
 
-        step        += 1
-        tokens_seen += global_batch
+        step             += 1
+        tokens_seen      += global_batch
+        steps_in_window  += 1
         running_loss = 0.9 * running_loss + 0.1 * batch_loss   # EMA
 
         # --- log ---
         if master and step % LOG_EVERY == 0:
-            elapsed   = time.perf_counter() - t_step_start
-            tps       = global_batch * LOG_EVERY / elapsed
-            t_step_start = time.perf_counter()
+            elapsed      = time.perf_counter() - t_step_start
+            tps          = global_batch * steps_in_window / elapsed
+            t_step_start    = time.perf_counter()
+            steps_in_window = 0
 
             total_elapsed = time.perf_counter() - t_run_start
             steps_left    = args.total_steps - step
-            eta_s         = steps_left * (total_elapsed / max(step - start_step, 1))
+            steps_done    = max(step - start_step, 1)
+            eta_s         = steps_left * (total_elapsed / steps_done)
             eta_h         = eta_s / 3600
 
             current_lr = scheduler.get_last_lr()[0]
