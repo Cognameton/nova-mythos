@@ -489,6 +489,7 @@ def main():
     if ddp:
         dist.barrier()
         dist.destroy_process_group()
+    os._exit(0)
 
 
 if __name__ == "__main__":
