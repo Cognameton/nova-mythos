@@ -1,0 +1,155 @@
+nova-mythos Training Session Log
+2026-04-26 / 2026-04-28
+================================================================================
+
+CURRENT STATE
+-------------
+Model        : mythos_lite (93.5M params)
+Checkpoint   : runs/lite-corpus/checkpoint-0031725
+Epochs done  : 9
+Steps done   : 31,725 of planned ~56,400 (16 Chinchilla epochs)
+Tokens seen  : ~1.04B of 1.87B Chinchilla target (55%)
+
+
+EPOCH HISTORY
+-------------
+Epoch 1  steps     1 –  3,525   corpus-only       loss floor ~4.2
+Epoch 2  steps  3,526 –  7,050  corpus-only       loss floor ~4.2
+Epoch 3  steps  7,051 – 10,575  mixed 30% corpus  loss floor ~4.7
+Epoch 4  steps 10,576 – 14,100  corpus-only       loss floor ~3.9
+Epoch 5  steps 14,101 – 17,625  corpus-only       loss floor ~3.1
+Epoch 6  steps 17,626 – 21,150  mixed 30% corpus  loss floor ~4.63
+Epoch 7  steps 21,151 – 24,675  mixed 30% corpus  loss floor ~4.67
+Epoch 8  steps 24,676 – 28,200  mixed 15% corpus  loss floor ~4.86  ← ratio dropped
+Epoch 9  steps 28,201 – 31,725  mixed 15% corpus  loss floor ~4.86
+Epoch 10 PENDING                mixed 15% corpus
+
+
+TRAINING SCHEDULE GOING FORWARD
+--------------------------------
+Epochs 10–16  : mixed, 15% corpus, 85% FineWeb-Edu
+                → increment --total-steps by 3,525 each epoch
+Epoch 17+     : pure FineWeb-Edu (drop corpus entirely, --dataset fineweb or --corpus-ratio 0)
+                → corpus knowledge baked in, no over-fit risk
+Target        : 32+ epochs for overtrained small model (inference-optimal)
+
+Corpus passes at epoch 9 : ~5.4×  (4 full corpus epochs + 5 mixed at avg 28% ratio)
+Corpus passes at epoch 16: ~6.4×  (safe — over-fit concern begins ~13×)
+
+
+UPCOMING COMMANDS
+-----------------
+
+Epoch 10:
+  .venv/bin/torchrun --nproc_per_node=2 training/train_lite.py \
+      --dataset mixed --corpus-path data/corpus/corpus.bin \
+      --corpus-ratio 0.15 --output-dir runs/lite-corpus \
+      --seq-len 512 --micro-batch 8 --grad-accum 4 \
+      --total-steps 35250 --warmup-steps 500 --resume
+
+Epoch 11:
+  --total-steps 38775  (all other args same)
+
+Epoch 12:
+  --total-steps 42300
+
+Epoch 13:
+  --total-steps 45825
+
+Epoch 14:
+  --total-steps 49350
+
+Epoch 15:
+  --total-steps 52875
+
+Epoch 16 (Chinchilla):
+  --total-steps 56400
+
+Epoch 17+ (pure FineWeb-Edu, drop corpus):
+  --dataset fineweb  (remove --corpus-path and --corpus-ratio)
+  --total-steps 59925  (continue incrementing by 3,525)
+
+Note: Run all commands as a single line (no backslash continuation).
+
+
+LOSS OBSERVATIONS
+-----------------
+- Epochs 1–5 (corpus-heavy): high variance, floor descended 4.2 → 3.1
+- Epochs 6–7 (mixed 30%): floor ~4.65, moderate variance
+- Epochs 8–9 (mixed 15%): floor ~4.86, variance very tight (5.0–5.15)
+  → tighter band = model stabilizing on FineWeb-Edu distribution (expected)
+- Memorization spike (loss ~0.88–1.09): harmless repeated short document
+  "The Jewish Revolutionary Spirit" by E. Michael Jones — 779,712 tokens,
+  at ~89% through each corpus pass. Recovers immediately after.
+
+
+THROUGHPUT
+----------
+Hardware     : 2x NVIDIA RTX 3060 12GB (PCIe, no NVLink)
+Global tok/s : ~11.6k sustained (DDP)
+VRAM/GPU     : ~10.1 GB / ~9.0 GB
+Time/epoch   : ~2.8 hours
+
+
+AVAILABLE CHECKPOINTS
+---------------------
+checkpoint-0025000   (mid epoch 8)
+checkpoint-0028200   (end epoch 8)
+checkpoint-0030000   (mid epoch 9)
+checkpoint-0031725   (end epoch 9)  ← resume from this one
+
+
+BUGS FIXED (all committed and pushed)
+--------------------------------------
+Commit 9d2ca43 — Fix DDP unused-parameter warning and resume display bugs
+  - find_unused_parameters=True added to DDP (required for ACT halting)
+  - tok/s and ETA display fixed on resume (was showing 2x tok/s first window)
+
+Commit 5601e98 — Fix NCCL SIGABRT on DDP teardown
+  - Added dist.barrier() before dist.destroy_process_group()
+  - Prevented rank race condition on teardown
+
+Commit 0348b32 — Fix SIGABRT on exit with HuggingFace streaming datasets
+  - Added os._exit(0) after DDP teardown
+  - HuggingFace streaming iterators were destructing in wrong order on exit
+  - Only affected mixed epochs (corpus-only epochs were unaffected)
+
+
+KNOWN WARNINGS (all harmless)
+-------------------------------
+- "Casting complex values to real discards the imaginary part" — bfloat16 cast, harmless
+- "find_unused_parameters=True ... no unused parameters found" — false positive,
+  ACT flow control may fire on later steps; flag is required
+- "Token indices sequence length is longer than specified maximum" — HuggingFace
+  tokenizer warning about its own internal limit (1024), not our seq_len of 512
+- "unauthenticated requests to HF Hub" — rate limits apply but haven't caused issues;
+  set HF_TOKEN env var to suppress if streaming slows down
+
+
+SCRIPT LOCATIONS
+----------------
+Training script  : training/train_lite.py
+Corpus prep      : training/prepare_corpus.py
+Benchmark        : training/benchmark_lite.py
+Docs             : docs/MYTHOS_LITE.md
+Results          : results/benchmark_lite_results.json
+
+
+CORPUS INFO
+-----------
+Location     : data/corpus/corpus.bin  (230.9 MB)
+Metadata     : data/corpus/meta.json
+Source       : /home/head-node/Documents/docuversity/docdoc/txt_files
+Files        : 894 processed, 59 empty skipped, 2 too short skipped
+Total tokens : 115,473,195 (115.5M)
+Tokenizer    : gpt2 (vocab 50,257)
+Epoch length : ~3,525 steps at seq=512 mb=8 acc=4 2xGPU (~2.8 hours)
+
+
+ENVIRONMENT
+-----------
+Working dir  : /home/head-node/Dev/ai-lab/nova-mythos
+Venv         : .venv  (activate: source .venv/bin/activate)
+torchrun     : .venv/bin/torchrun  (not system torchrun)
+Git remote   : github.com:Cognameton/nova-mythos.git  (branch: main)
+================================================================================
