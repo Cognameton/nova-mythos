@@ -40,6 +40,7 @@ import argparse
 import json
 import math
 import os
+import random
 import shutil
 import sys
 import time
@@ -63,6 +64,8 @@ from nova_mythos.model.variants import mythos_lite
 
 DATASET_NAME   = "HuggingFaceFW/fineweb-edu"
 DATASET_CONFIG = "sample-10BT"
+COSMOPEDIA_NAME   = "HuggingFaceTB/cosmopedia"
+COSMOPEDIA_CONFIG = "web_samples_v2"
 VOCAB_SIZE     = 50257   # gpt2
 
 # ---------------------------------------------------------------------------
@@ -106,6 +109,52 @@ class FineWebDataset(IterableDataset):
         ds = load_dataset(
             DATASET_NAME,
             name=DATASET_CONFIG,
+            split="train",
+            streaming=True,
+        ).shuffle(seed=self.seed, buffer_size=10_000)
+
+        if self.world_size > 1:
+            ds = ds.shard(num_shards=self.world_size, index=self.rank)
+
+        buf: list[int] = []
+        for example in ds:
+            ids = tokenizer.encode(example["text"], add_special_tokens=False)
+            buf.extend(ids)
+            buf.append(eos)
+            while len(buf) >= self.seq_len + 1:
+                chunk = buf[: self.seq_len + 1]
+                buf   = buf[self.seq_len + 1 :]
+                yield (
+                    torch.tensor(chunk[:-1], dtype=torch.long),
+                    torch.tensor(chunk[1:],  dtype=torch.long),
+                )
+
+
+# ---------------------------------------------------------------------------
+# Cosmopedia dataset (HF streaming, gpt2-tokenised)
+# ---------------------------------------------------------------------------
+
+class CosmopediaDataset(IterableDataset):
+    """Streams Cosmopedia (synthetic textbooks/web samples), tokenises with gpt2."""
+
+    def __init__(self, seq_len: int, rank: int, world_size: int, seed: int = 42,
+                 config: str = COSMOPEDIA_CONFIG):
+        self.seq_len    = seq_len
+        self.rank       = rank
+        self.world_size = world_size
+        self.seed       = seed
+        self.config     = config
+
+    def __iter__(self):
+        from datasets import load_dataset
+        from transformers import GPT2TokenizerFast
+
+        tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
+        eos = tokenizer.eos_token_id
+
+        ds = load_dataset(
+            COSMOPEDIA_NAME,
+            name=self.config,
             split="train",
             streaming=True,
         ).shuffle(seed=self.seed, buffer_size=10_000)
@@ -176,9 +225,12 @@ class CorpusDataset(IterableDataset):
 # ---------------------------------------------------------------------------
 
 class MixedDataset(IterableDataset):
-    """Yields from CorpusDataset with probability `corpus_ratio`,
-    otherwise from FineWebDataset.  Mixing is per-batch, not per-token,
-    so the actual ratio is approximate but consistent over long runs."""
+    """Interleaves up to three streams: corpus, Cosmopedia, FineWeb-Edu.
+
+    Per-sample Bernoulli draw selects the source: corpus with probability
+    `corpus_ratio`, Cosmopedia with probability `cosmopedia_ratio` (if its
+    stream is enabled), otherwise FineWeb-Edu. Ratios are approximate but
+    consistent over long runs."""
 
     def __init__(
         self,
@@ -187,20 +239,37 @@ class MixedDataset(IterableDataset):
         rank: int,
         world_size: int,
         corpus_ratio: float = 0.1,
+        cosmopedia_ratio: float = 0.0,
         seed: int = 42,
     ):
-        self.corpus  = CorpusDataset(corpus_path, seq_len, rank, world_size)
-        self.fineweb = FineWebDataset(seq_len, rank, world_size, seed)
-        self.corpus_ratio = corpus_ratio
+        if corpus_ratio + cosmopedia_ratio > 1.0:
+            raise ValueError(
+                f"corpus_ratio ({corpus_ratio}) + cosmopedia_ratio "
+                f"({cosmopedia_ratio}) must be <= 1.0"
+            )
+        self.corpus           = CorpusDataset(corpus_path, seq_len, rank, world_size)
+        self.fineweb          = FineWebDataset(seq_len, rank, world_size, seed)
+        self.cosmopedia       = (
+            CosmopediaDataset(seq_len, rank, world_size, seed)
+            if cosmopedia_ratio > 0
+            else None
+        )
+        self.corpus_ratio     = corpus_ratio
+        self.cosmopedia_ratio = cosmopedia_ratio
 
     def __iter__(self):
         import random
         rng         = random.Random(42)
         corpus_iter = iter(self.corpus)
         fw_iter     = iter(self.fineweb)
+        cos_iter    = iter(self.cosmopedia) if self.cosmopedia else None
+        cos_threshold = self.corpus_ratio + self.cosmopedia_ratio
         while True:
-            if rng.random() < self.corpus_ratio:
+            r = rng.random()
+            if r < self.corpus_ratio:
                 yield next(corpus_iter)
+            elif cos_iter is not None and r < cos_threshold:
+                yield next(cos_iter)
             else:
                 yield next(fw_iter)
 
@@ -217,6 +286,61 @@ def make_lr_lambda(warmup_steps: int, total_steps: int, min_lr_ratio: float):
         cosine   = 0.5 * (1.0 + math.cos(math.pi * progress))
         return min_lr_ratio + (1.0 - min_lr_ratio) * cosine
     return lr_lambda
+
+
+def parse_train_depths(raw: str) -> list[int]:
+    depths = [int(part.strip()) for part in raw.split(",") if part.strip()]
+    if not depths:
+        raise ValueError("--train-depths must contain at least one integer")
+    if any(depth <= 0 for depth in depths):
+        raise ValueError("--train-depths values must be positive")
+    return depths
+
+
+def split_optimizer_params(model: nn.Module, base_lr: float, act_lr_scale: float):
+    """Build AdamW parameter groups, optionally isolating the ACT halting head."""
+    if act_lr_scale == 1.0:
+        return model.parameters()
+
+    act_params = []
+    base_params = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if ".recurrent.act." in name or name.startswith("recurrent.act."):
+            act_params.append(param)
+        else:
+            base_params.append(param)
+
+    groups = [{"params": base_params}]
+    if act_params:
+        groups.append(
+            {
+                "params": act_params,
+                "lr": base_lr * act_lr_scale,
+                "weight_decay": 0.0,
+            }
+        )
+    return groups
+
+
+def compute_act_aux_loss(
+    act_probs: list[torch.Tensor],
+    threshold: float,
+    target_mass: float,
+) -> torch.Tensor:
+    """Penalize still-running tokens whose final ACT mass remains sub-target."""
+    if not act_probs:
+        raise ValueError("ACT auxiliary loss requested but no ACT probabilities captured")
+
+    cumulative = torch.zeros_like(act_probs[0])
+    halted = torch.zeros_like(act_probs[0], dtype=torch.bool)
+    for p in act_probs:
+        still_running = ~halted
+        cumulative = cumulative + p * still_running.to(dtype=p.dtype)
+        halted = halted | (cumulative >= threshold)
+
+    return torch.relu(target_mass - cumulative).pow(2).mean()
 
 
 # ---------------------------------------------------------------------------
@@ -249,12 +373,17 @@ def save_checkpoint(
     return ckpt_dir
 
 
-def load_checkpoint(ckpt_dir: Path, model: nn.Module, optimizer, scheduler, ddp: bool):
+def load_checkpoint(ckpt_dir: Path, model: nn.Module, optimizer, scheduler, ddp: bool,
+                    restart_lr: bool = False):
+    """Load model weights from checkpoint. If restart_lr=True, skip restoring
+    optimizer and scheduler state — caller's freshly-built optimizer/scheduler
+    take effect from this step onward (warm-restart for the LR schedule)."""
     state = torch.load(ckpt_dir / "state.pt", map_location="cpu", weights_only=True)
     raw_model = model.module if ddp else model
     raw_model.load_state_dict(state["model"])
-    optimizer.load_state_dict(state["optimizer"])
-    scheduler.load_state_dict(state["scheduler"])
+    if not restart_lr:
+        optimizer.load_state_dict(state["optimizer"])
+        scheduler.load_state_dict(state["scheduler"])
     return state["step"]
 
 
@@ -277,6 +406,9 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--output-dir",        type=Path, required=True)
     p.add_argument("--resume",            action="store_true")
+    p.add_argument("--resume-from",       type=Path, default=None,
+                   help="Checkpoint directory to load while writing new "
+                        "checkpoints to --output-dir.")
     p.add_argument("--seq-len",           type=int,   default=SEQ_LEN)
     p.add_argument("--micro-batch",       type=int,   default=MICRO_BATCH)
     p.add_argument("--grad-accum",        type=int,   default=GRAD_ACCUM)
@@ -294,11 +426,37 @@ def parse_args():
                    help="Path to corpus.bin from prepare_corpus.py (required for corpus/mixed)")
     p.add_argument("--corpus-ratio",      type=float, default=0.1,
                    help="Fraction of batches drawn from corpus in mixed mode (default 0.1)")
+    p.add_argument("--cosmopedia-ratio",  type=float, default=0.0,
+                   help="Fraction of batches drawn from Cosmopedia in mixed mode "
+                        "(default 0.0 = disabled). Remainder of mixed = FineWeb-Edu.")
+    p.add_argument("--restart-lr",        action="store_true",
+                   help="On --resume, keep model weights but reset optimizer and "
+                        "scheduler. Use with new --peak-lr / --warmup-steps to do "
+                        "an LR warm-restart from the resumed step.")
+    p.add_argument("--train-depths",      default="8",
+                   help="Comma-separated recurrent depths sampled during training "
+                        "(default: 8). Example: 6,8,10,12")
+    p.add_argument("--act-lr-scale",      type=float, default=1.0,
+                   help="LR multiplier for recurrent.act.* params. Values other "
+                        "than 1.0 create a separate no-weight-decay param group.")
+    p.add_argument("--act-loss-weight",   type=float, default=0.0,
+                   help="Weight for ACT rehab loss that pushes final cumulative "
+                        "halting mass toward --act-target-mass.")
+    p.add_argument("--act-target-mass",   type=float, default=0.99,
+                   help="Target final cumulative ACT mass for --act-loss-weight.")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
+    if args.act_lr_scale <= 0:
+        raise ValueError("--act-lr-scale must be positive")
+    if args.act_loss_weight < 0:
+        raise ValueError("--act-loss-weight must be non-negative")
+    if not 0 < args.act_target_mass <= 1.0:
+        raise ValueError("--act-target-mass must be in (0, 1]")
+    train_depths = parse_train_depths(args.train_depths)
+    depth_rng = random.Random(args.seed)
 
     # --- distributed setup ---
     ddp = int(os.environ.get("RANK", -1)) != -1
@@ -324,7 +482,12 @@ def main():
     if master:
         dataset_desc = args.dataset
         if args.dataset == "mixed":
-            dataset_desc = f"mixed ({args.corpus_ratio:.0%} corpus + {1-args.corpus_ratio:.0%} FineWeb-Edu)"
+            fw_ratio = 1 - args.corpus_ratio - args.cosmopedia_ratio
+            parts = [f"{args.corpus_ratio:.0%} corpus"]
+            if args.cosmopedia_ratio > 0:
+                parts.append(f"{args.cosmopedia_ratio:.0%} Cosmopedia")
+            parts.append(f"{fw_ratio:.0%} FineWeb-Edu")
+            dataset_desc = f"mixed ({' + '.join(parts)})"
         elif args.dataset == "corpus":
             dataset_desc = f"corpus ({args.corpus_path})"
 
@@ -337,6 +500,11 @@ def main():
         print(f"  Total steps  : {args.total_steps:,}")
         print(f"  Warmup steps : {args.warmup_steps:,}")
         print(f"  Peak LR      : {args.peak_lr}")
+        print(f"  Train depths : {train_depths}")
+        if args.act_loss_weight > 0:
+            print(f"  ACT rehab    : weight={args.act_loss_weight} "
+                  f"target_mass={args.act_target_mass} "
+                  f"act_lr_scale={args.act_lr_scale}")
         print(f"  Total tokens : {global_batch * args.total_steps / 1e9:.1f}B")
         print(f"{'='*60}\n")
 
@@ -350,7 +518,7 @@ def main():
 
     # --- optimizer + scheduler ---
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        split_optimizer_params(model, args.peak_lr, args.act_lr_scale),
         lr=args.peak_lr,
         weight_decay=WEIGHT_DECAY,
         fused=torch.cuda.is_available(),
@@ -362,17 +530,24 @@ def main():
 
     # --- resume ---
     start_step = 0
-    if args.resume:
-        ckpt = find_latest_checkpoint(args.output_dir)
+    if args.resume or args.resume_from is not None:
+        ckpt = args.resume_from or find_latest_checkpoint(args.output_dir)
         if ckpt is None:
             if master:
                 print("No checkpoint found — starting from scratch.")
         else:
             if master:
                 print(f"Resuming from {ckpt.name}")
-            start_step = load_checkpoint(ckpt, model, optimizer, scheduler, ddp)
+            start_step = load_checkpoint(
+                ckpt, model, optimizer, scheduler, ddp,
+                restart_lr=args.restart_lr,
+            )
             if master:
-                print(f"Resumed at step {start_step:,}\n")
+                if args.restart_lr:
+                    print(f"Resumed at step {start_step:,} with LR warm-restart "
+                          f"(peak {args.peak_lr}, warmup {args.warmup_steps})\n")
+                else:
+                    print(f"Resumed at step {start_step:,}\n")
 
     # --- data ---
     if args.dataset == "fineweb":
@@ -393,7 +568,9 @@ def main():
         dataset = MixedDataset(
             corpus_path=args.corpus_path, seq_len=args.seq_len,
             rank=rank, world_size=world_size,
-            corpus_ratio=args.corpus_ratio, seed=args.seed,
+            corpus_ratio=args.corpus_ratio,
+            cosmopedia_ratio=args.cosmopedia_ratio,
+            seed=args.seed,
         )
 
     loader = DataLoader(dataset, batch_size=args.micro_batch, num_workers=0)
@@ -424,12 +601,41 @@ def main():
                 x, y = next(data_iter)
 
             x, y = x.to(device), y.to(device)
+            n_loops = depth_rng.choice(train_depths)
+            raw_model = model.module if ddp else model
+            act_probs: list[torch.Tensor] = []
+            original_act_forward = None
+            if args.act_loss_weight > 0:
+                original_act_forward = raw_model.recurrent.act.forward
+
+                def capture_act(h):
+                    p = original_act_forward(h)
+                    act_probs.append(p)
+                    return p
+
+                raw_model.recurrent.act.forward = capture_act
+
             with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-                logits = model(x)
-                loss   = loss_fn(
+                try:
+                    logits = model(x, n_loops=n_loops)
+                finally:
+                    if original_act_forward is not None:
+                        raw_model.recurrent.act.forward = original_act_forward
+
+                ce_loss = loss_fn(
                     logits.reshape(-1, VOCAB_SIZE),
                     y.reshape(-1),
-                ) / args.grad_accum
+                )
+                if args.act_loss_weight > 0:
+                    act_loss = compute_act_aux_loss(
+                        act_probs,
+                        raw_model.cfg.act_threshold,
+                        args.act_target_mass,
+                    )
+                    loss = ce_loss + args.act_loss_weight * act_loss
+                else:
+                    loss = ce_loss
+                loss = loss / args.grad_accum
             loss.backward()
             batch_loss += loss.item()
 
