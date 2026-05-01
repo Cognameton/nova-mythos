@@ -82,7 +82,9 @@ GRAD_CLIP       = 1.0
 WARMUP_STEPS    = 2_000
 TOTAL_STEPS     = 305_176   # 10B tokens / (512*8*4*2)
 SAVE_EVERY      = 5_000
-KEEP_CHECKPOINTS = 3
+KEEP_CHECKPOINTS = 30  # one per epoch for ~24 epochs + headroom; bumped from 3
+                       # after losing checkpoint-0042300 to cleanup made an
+                       # ACT-rehab fork impossible.
 LOG_EVERY       = 50
 
 
@@ -412,7 +414,13 @@ def parse_args():
     p.add_argument("--seq-len",           type=int,   default=SEQ_LEN)
     p.add_argument("--micro-batch",       type=int,   default=MICRO_BATCH)
     p.add_argument("--grad-accum",        type=int,   default=GRAD_ACCUM)
-    p.add_argument("--total-steps",       type=int,   default=TOTAL_STEPS)
+    p.add_argument("--total-steps",       type=int,   default=TOTAL_STEPS,
+                   help="Stop training when global step reaches this value.")
+    p.add_argument("--cosine-horizon",    type=int,   default=None,
+                   help="Step count over which cosine LR decays from peak to "
+                        "min_lr. Defaults to --total-steps. Set this to a fixed "
+                        "long horizon when launching epoch-by-epoch so the LR "
+                        "schedule remains consistent across resumes.")
     p.add_argument("--warmup-steps",      type=int,   default=WARMUP_STEPS)
     p.add_argument("--peak-lr",           type=float, default=PEAK_LR)
     p.add_argument("--min-lr",            type=float, default=MIN_LR)
@@ -457,6 +465,12 @@ def main():
         raise ValueError("--act-target-mass must be in (0, 1]")
     train_depths = parse_train_depths(args.train_depths)
     depth_rng = random.Random(args.seed)
+    cosine_horizon = args.cosine_horizon if args.cosine_horizon is not None else args.total_steps
+    if cosine_horizon <= args.warmup_steps:
+        raise ValueError(
+            f"--cosine-horizon ({cosine_horizon}) must exceed --warmup-steps "
+            f"({args.warmup_steps})"
+        )
 
     # --- distributed setup ---
     ddp = int(os.environ.get("RANK", -1)) != -1
@@ -498,6 +512,7 @@ def main():
         print(f"  GPUs         : {world_size}")
         print(f"  Global batch : {global_batch:,} tokens/step")
         print(f"  Total steps  : {args.total_steps:,}")
+        print(f"  Cosine horiz : {cosine_horizon:,}")
         print(f"  Warmup steps : {args.warmup_steps:,}")
         print(f"  Peak LR      : {args.peak_lr}")
         print(f"  Train depths : {train_depths}")
@@ -525,7 +540,7 @@ def main():
     )
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer,
-        make_lr_lambda(args.warmup_steps, args.total_steps, args.min_lr / args.peak_lr),
+        make_lr_lambda(args.warmup_steps, cosine_horizon, args.min_lr / args.peak_lr),
     )
 
     # --- resume ---
