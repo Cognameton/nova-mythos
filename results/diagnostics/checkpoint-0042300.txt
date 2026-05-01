@@ -1,0 +1,60 @@
+loading runs/lite-corpus/checkpoint-0042300 ...
+model: 93.5M params  max_loop_iters=8  n_experts=8  topk=2  lora_rank=4
+eval batch: (4, 512) drawn from end of data/corpus/corpus.bin
+
+[1] Loss vs n_loops
+    (lower = better; a flat curve means recurrence isn't earning compute)
+    n_loops |   loss
+    --------+--------
+          1 | 6.2265
+          2 | 6.0319
+          4 | 5.8829
+          8 | 4.8821
+         16 | 4.8825
+    → span across n_loops: 1.3444
+
+[2] ACT halting distribution (threshold=0.99, max_loops=8)
+    halt step | tokens | %
+    ----------+--------+------
+            1 |     20 |   1.0%
+            2 |      8 |   0.4%
+            3 |     12 |   0.6%
+            4 |     12 |   0.6%
+            5 |     18 |   0.9%
+            6 |    141 |   6.9%
+            7 |   1597 |  78.0%
+        never |    240 |  11.7%
+    → mean halt step: 6.91
+
+[3] MoE routing distribution (8 experts, top-2)
+    expert | routes |   %  | bar
+    -------+--------+------+----
+         3 |   7199 | 22.0% | ########################################
+         0 |   6633 | 20.2% | ####################################
+         5 |   5472 | 16.7% | ##############################
+         4 |   4504 | 13.7% | #########################
+         1 |   4435 | 13.5% | ########################
+         7 |   4328 | 13.2% | ########################
+         2 |    138 |  0.4% | 
+         6 |     59 |  0.2% | 
+    → balanced load = 12.5%/expert; top expert = 22.0%; used = 8/8
+
+[4] LTI injection: h_{t+1} = A·h_t + B·e + transformer_out
+    A diag — min=0.3407  median=0.3505  max=0.3673
+    A < 0.05 (state forgotten each step) :   0.0% of channels
+    A > 0.95 (state nearly preserved)    :   0.0% of channels
+    B    — min=0.0806  median=0.1001  max=0.1226
+
+[5] LoRA per-loop scale (8 loops × rank 4)
+    loop | ‖scale‖ | cos(loop_0)
+    -----+---------+------------
+       0 |  0.0472 | +1.0000
+       1 |  0.0716 | -0.2128
+       2 |  0.0485 | -0.3457
+       3 |  0.0723 | -0.8973
+       4 |  0.0833 | -0.9439
+       5 |  0.0794 | -0.7007
+       6 |  0.1423 | -0.0656
+       7 |  0.2244 | +0.2788
+
+done.

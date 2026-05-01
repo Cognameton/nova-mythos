@@ -1,0 +1,60 @@
+# probe results for runs/lite-corpus/checkpoint-0042300
+# date         : 2026-04-30T03:47:14
+# params       : 93.5M
+# temperature  : 0.8   top_k: 40
+# n_loops      : 8   (cfg.max_loop_iters=8)
+# max_new_toks : 120   seed: 42
+=== [story] ===
+Once upon a time, for the purpose of the movement in which they had been able to come and have been able to continue with the help of the public, and to which they had taken such a new situation.
+One of the time from the meeting of the
+Israeli war came to the meeting of the Congress and the United States. In other words, a new and most successful operation of the state is the same for the purpose of the government and the United States’s Government had established. It was a very popular and its major role in the war, which allowed them to be made to serve the right in
+
+=== [history] ===
+The Industrial Revolution was a period when the Japanese government was reelected in the Middle Ages and the World Government, it was not at war with the United States (1897), but this year was probably not a mere document that led to the United States from the Balkans of the United States. Many of the Germans were now working in the United States. In other words, a new German military agreement at the University of New York in July 1941, the United States was declared to be the central bank of the Civil War, which was a part of the United States, which was a separate relationship between the United States and the United States in
+
+=== [science] ===
+Photosynthesis is the process by which the system of the material can be used?
+It is hard to see how it could be done with the data on the field of the system.
+The process is a tool that allows the project to help the system of the system to avoid the current and reduce risk of the environment. This means that the user must continue to achieve a new and direct transition at the outset. This could be a key thing from the internet and the media.
+The key to creating a network, which is a product of the network, is more vulnerable than a single-quality way.
+If the project is
+
+=== [qa] ===
+Q: What is the largest planet in our solar system?
+A: What you can do is that the world?
+It is hard to see it and not all this?
+What is the real difference, the most important part of the world is that it is a great thing. The best example of the world is to make it very much more effective than the other, and how much it seems to be. We must find a good thing:
+- How many plants are from the earth's right?
+“It’s just that we have a great number of different types of animals,” says James, author of the first English language in
+
+=== [code] ===
+def fibonacci(n):
+    |b-m-g-, 1.8.0,0.0
+A "c)
+- (a) = the ‘an example, (2.0), the most common, from the ‘’) is a natural form that leads to the right value of the brain. In a recent study, the authors found at the outset:
+- The term ‘béur's theory is that’.
+- ‘- The authors and ’, in particular, are not a few:
+- "Kerin, "C
+
+=== [formal] ===
+Dear Sir or Madam,
+
+I am writing to go to the same direction as the other.
+It is hard to answer it and not all this?
+What is the real difference between the “the law?”
+And you see the right time from the country of the world.
+• The law was the highest of the value of the country.
+“But the same thing was a right thing:
+- The more the same is that “the world had changed its way of the world.”
+This is the way, however, that the number of dollars has now been made to the world and not
+
+=== [sequence] ===
+Monday, Tuesday, Wednesday, for the last week, said the same story had been completed in December, 2001.
+A "One of the people of the country, the most powerful, is not a mere-author, but the United States and the country of the United States is a strong one. It may be considered the most common way in which a group of people will be able to live, but it could be more important to have any attempt to make a job where they are ready to come. So we have a great number of dollars, but we are not aware of this, but there are more than 100 million
+
+=== [openended] ===
+The most important thing to remember about learning is for you to learn how you can help you to understand the facts and answer it.
+How does you want to make the results?
+If you are trying to understand the fact that you see it.
+I'm not sure it’s more about the risk of using your personal awareness. To find ourselves in other ways, your family will do it at your goal:
+- Have many problems in your brain, and that you are in a way you have to be able to take a time to get a child to do, and that is only a way to come in the face and

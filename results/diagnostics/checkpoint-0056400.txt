@@ -1,0 +1,55 @@
+loading runs/lite-corpus/checkpoint-0056400 ...
+model: 93.5M params  max_loop_iters=8  n_experts=8  topk=2  lora_rank=4
+eval batch: (4, 512) drawn from end of data/corpus/corpus.bin
+
+[1] Loss vs n_loops
+    (lower = better; a flat curve means recurrence isn't earning compute)
+    n_loops |   loss
+    --------+--------
+          1 | 6.0293
+          2 | 5.9656
+          4 | 5.9328
+          8 | 4.5576
+         16 | 4.8222
+    → span across n_loops: 1.4717
+
+[2] ACT halting distribution (threshold=0.99, max_loops=8)
+    halt step | tokens | %
+    ----------+--------+------
+            7 |      3 |   0.1%
+        never |   2045 |  99.9%
+    → mean halt step: 8.00
+    ⚠ ACT never fires — every token uses full depth (halting predictor untrained)
+
+[3] MoE routing distribution (8 experts, top-2)
+    expert | routes |   %  | bar
+    -------+--------+------+----
+         3 |   6953 | 21.2% | ########################################
+         0 |   6443 | 19.7% | #####################################
+         5 |   5583 | 17.0% | ################################
+         4 |   4231 | 12.9% | ########################
+         7 |   3968 | 12.1% | ######################
+         1 |   3277 | 10.0% | ##################
+         2 |   1391 |  4.2% | ########
+         6 |    922 |  2.8% | #####
+    → balanced load = 12.5%/expert; top expert = 21.2%; used = 8/8
+
+[4] LTI injection: h_{t+1} = A·h_t + B·e + transformer_out
+    A diag — min=0.3313  median=0.3352  max=0.3579
+    A < 0.05 (state forgotten each step) :   0.0% of channels
+    A > 0.95 (state nearly preserved)    :   0.0% of channels
+    B    — min=0.0806  median=0.1001  max=0.1226
+
+[5] LoRA per-loop scale (8 loops × rank 4)
+    loop | ‖scale‖ | cos(loop_0)
+    -----+---------+------------
+       0 |  0.0570 | +1.0000
+       1 |  0.0792 | -0.4274
+       2 |  0.0642 | -0.5136
+       3 |  0.0814 | -0.9572
+       4 |  0.0860 | -0.9467
+       5 |  0.0838 | -0.6513
+       6 |  0.1412 | +0.0353
+       7 |  0.2270 | +0.3945
+
+done.

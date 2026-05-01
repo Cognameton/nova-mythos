@@ -16,3 +16,9 @@ build/
 *.egg-info/
 .pytest_cache/
 data/corpus/
+
+# Training artifacts (large; reproducible from configs and code)
+runs/
+
+# Local session notes
+session_log_*.txt

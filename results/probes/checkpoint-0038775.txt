@@ -1,0 +1,65 @@
+# probe results for runs/lite-corpus/checkpoint-0038775
+# date         : 2026-04-29T16:26:40
+# params       : 93.5M
+# temperature  : 0.8   top_k: 40
+# n_loops      : 8   (cfg.max_loop_iters=8)
+# max_new_toks : 120   seed: 42
+=== [story] ===
+Once upon a time, for the purpose of the movement in which they had been able to come and have been able to continue with the help of the public, and to which they had taken such a new situation.
+One of the time from the meeting of the
+Israeli war came to the meeting of the Congress and the United States. In other words, a new and most successful operation of the state is the same for the purpose of the government and the United States’s Government had established. It was a very popular and its major role in the war, which allowed them to be made to serve the right in
+
+=== [history] ===
+The Industrial Revolution was a period when the Japanese had begun to be destroyed, and had the first in the late nineteenth century. The United States was at the time as the United States and the United States, and in turn, the United States was almost entirely independent.
+The United States is a strong alliance that helped to live in the United States. In other words, the United States must be at the outset the same time in many countries as well. The main reason for the EU is because of the fact that many countries have a great influence in the urban area. In 2009, the United States and the United States have been in
+
+=== [science] ===
+Photosynthesis is the process by which the system of the material can be used?
+It is hard to see how it could be done with the data on the field of the system.
+The process is a tool that allows the project to help the system of the system to avoid the current and reduce risk of the environment. This means that the user must continue to achieve a new and direct transition at the outset. This could be a key thing from the internet and the media.
+The key to creating a network, which is a product of the network, is more vulnerable than a single-quality way.
+If the project is
+
+=== [qa] ===
+Q: What is the largest planet in our solar system?
+A: What you can do is that the world?
+It is hard to see it and not all this?
+What is the real difference, the most important part of the world is that you see it in your own land and will help you to be on your feet, but you may need to start with. So when you come to your family and you will be able to work.
+• When you live, you will look at the bottom of your life.
+- Do your life take all your own time.
+- Are you a great thing to do?
+You can use your home
+
+=== [code] ===
+def fibonacci(n):
+    |b-m-g-, 1.8.0,0.0
+A "c)
+- (a) = the ‘an example, (2.0), the most common, from the ‘’) is a natural form that leads to the right value of the brain. In a recent study, the authors found at the outset:
+- The term ‘béur's theory is that’.
+- ‘- The authors and ’, in particular, are not a few:
+- "Kerin, "C
+
+=== [formal] ===
+Dear Sir or Madam,
+
+I am writing to go to the same direction as the other.
+It is hard to answer it and not all this?
+What is the real difference between the “the law?”
+And you see the right time from the country of the world.
+• The law was the highest of the value of the country.
+“But the same thing was a right thing:
+- The more the same is that “the world had changed its way of the world.”
+This is the way, however, that the number of dollars has now been made to the world and not
+
+=== [sequence] ===
+Monday, Tuesday, Wednesday, for the last week, said the same story had been completed in a month of the last month.
+“We all know the time the “the year” (1:30) the year, and the year of the day.
+According to the report, we had a new study. They had a lot of examples of the number of days, but the year could be more than the two. I was in the next stage.
+The second-day, we have a low number of days, and we won’t only be a new book in the course in
+
+=== [openended] ===
+The most important thing to remember about learning is for you to learn how you can help you to understand the facts and answer it.
+How does you want to make the results?
+If you are trying to understand the fact that you see it in your own way, and your teacher can be aware that you are going to know what you are in. So when you come to your family and you should be able to work.
+• When you are doing this, you can be able to get a bit of problems or your life.
+To check your kids, you will want to know their parents, and then you are not interested in
