@@ -1,7 +1,7 @@
 # nova-mythos / mythos_lite — Research Findings Log
 
 **Status:** working draft, in-flight. Findings are accumulated across training epochs.
-**Updated through:** end of epoch 16 (step 56,400; 1.85B tokens — Chinchilla target hit).
+**Updated through:** end of epoch 16 of run v1 (step 56,400; 1.85B tokens — Chinchilla target hit), plus epoch 1 of run v2 (clean restart, step 3,525) which exposed an architectural bug; v3 launches after the fix.
 **Purpose:** preserve experimental observations and decisions across Claude Code sessions so they don't get lost.
 
 This is a research log, not a paper draft. Sections are structured so they can be lifted into a paper if/when one is written.
@@ -12,7 +12,7 @@ This is a research log, not a paper draft. Sections are structured so they can b
 
 A 93.5M-parameter Recurrent-Depth Transformer (mythos_lite, scaled-down variant of openmythos) plateaued at training loss ~5.0 after 12 epochs of pretraining (~1.4B tokens, FineWeb-Edu + local corpus). We hypothesized the plateau was learning-rate-bound (cosine schedule had bottomed at min_lr = 3e-5 for 5 consecutive epochs). We ran a five-signal diagnostic to confirm the recurrent / latent-reasoning machinery was functioning before intervening. The diagnostic showed the architecture was healthy; the plateau was not architectural. We then ran a combined intervention: LR warm-restart (peak 1.5e-4) and a data-distribution shift introducing Cosmopedia at 30% (later 60%). Loss dropped from 5.0 → 4.37 → 3.99 over two epochs (~0.6 nats and ~0.4 nats respectively).
 
-Side effects of the intervention are documented: ACT halting head was destabilized by the optimizer reset and now barely fires; MoE routing partially recovered two previously-dead experts.
+We initially attributed the ACT halting collapse and depth-extrapolation loss observed at epochs 13–16 to the optimizer reset performed during the warm-restart. **A fresh-start run (v2) with no warm-restart contradicted that diagnosis: ACT collapsed to mass 0.083 within a single epoch.** The actual cause is an architectural bug in `RecurrentBlock.forward` — the per-loop ACT remainder is only assigned when cumulative mass crosses threshold mid-loop; for tokens that never cross threshold, no remainder is forced at the loop end, so `h_out` has mass < 1.0. The coda adapts by amplifying internally, creating a degenerate basin where "kill ACT" is the path of least resistance. Bug fixed; v3 run launching with the fix.
 
 ---
 
@@ -204,13 +204,79 @@ Diagnostic series across checkpoints (epoch 12, 13, 16):
 | LTI A median | 0.350 | 0.337 | 0.335 | stable, healthy |
 | LoRA loop differentiation | strong | strong | strong (frozen) | stabilized |
 
-### ACT regression (paper-relevant observation)
+### ACT collapse — initial misdiagnosis, then the real cause
 
-When `--restart-lr` reset the optimizer, the ACT halting predictor's Adam moments were zeroed along with everything else. Under the high LR (1.5e-4), the halting head was pushed toward predicting near-zero per-iteration halt probabilities. As of checkpoint-0045825, **91.2% of tokens never reach the cumulative threshold within 8 iterations.**
+**Initial diagnosis (later corrected):** When `--restart-lr` reset the optimizer, the ACT halting predictor's Adam moments were zeroed along with everything else. Under the high LR (1.5e-4), the halting head was pushed toward predicting near-zero per-iteration halt probabilities. As of checkpoint-0045825, **91.2% of tokens never reach the cumulative threshold within 8 iterations.**
 
 Implication: the model now effectively runs full recurrent depth on every token (no adaptive compute). This costs ~12% extra compute per forward pass but is functionally fine — the per-loop weighting just becomes near-uniform across iterations. Loss did not regress (it dropped sharply), so this is an artifact of the warm-restart, not active harm.
 
-**Update (epoch 16):** ACT did *not* self-recover under cosine LR decay. The mean halt step drifted further to 8.00 (99.9% of tokens never halt). My epoch-13 prediction of slow recovery was wrong — the implicit gradient pressure from under-magnitude hidden states is not strong enough to overcome the high-LR-induced bias. ACT is now permanently collapsed unless explicit intervention is applied (auxiliary ponder loss, separate LR for the halting head, or reinitialization).
+**Update (epoch 16):** ACT did *not* self-recover under cosine LR decay. The mean halt step drifted further to 8.00 (99.9% of tokens never halt). The epoch-13 prediction of slow recovery was wrong — the implicit gradient pressure from under-magnitude hidden states is not strong enough to overcome the high-LR-induced bias.
+
+### Real diagnosis: architectural bug (run v2 epoch 1)
+
+After three epochs of inability to recover ACT, we ran a fresh "clean" pretraining run (v2) with no warm-restart, no `--restart-lr`, fresh weights, and a 20% corpus / 60% Cosmopedia / 20% FineWeb-Edu mix. Hypothesis: ACT collapse was caused by `--restart-lr` zeroing the halting head's Adam moments, and a fresh run would show normal ACT behaviour.
+
+**The hypothesis was wrong.** Diagnostic on `runs/lite-v2/checkpoint-0003525` (end of v2 epoch 1) showed:
+
+| Signal | v2 ep 1 | v1 ep 16 (broken) |
+|---|---|---|
+| Final ACT mass mean | 0.083 | 0.327 |
+| % tokens never halt | 100% | 99.9% |
+| Mean halt step | 8.00 | 8.00 |
+| Loss @ n_loops=8 | 5.00 | 4.56 |
+| Loss @ n_loops=16 | 5.43 | 4.82 |
+| Depth extrap gap | +0.43 nats | +0.26 nats |
+
+**ACT collapsed within a single epoch of clean training.** The warm-restart was not the cause — it was an accelerant on top of an underlying architectural failure mode.
+
+The actual cause is in `RecurrentBlock.forward` — the per-loop ACT weighting code:
+
+```python
+remainder = (1.0 - cumulative_p).clamp(min=0)
+weight = torch.where(
+    cumulative_p + p >= self.cfg.act_threshold,
+    remainder,    # final mass when threshold crossed mid-loop
+    p,            # otherwise, just contribute p
+)
+weight = weight * still_running.to(dtype=h.dtype)
+h_out = h_out + weight.unsqueeze(-1) * h
+```
+
+The remainder trick only fires when threshold is crossed *mid-loop*. If a token's cumulative mass stays below threshold through all `max_loop_iters` iterations, no remainder is ever assigned. `h_out` ends up with mass equal to `sum(p_t)` < threshold, which can be arbitrarily small (we observed 0.025 minimum, 0.083 mean).
+
+The coda is downstream of `h_out`. Underweighted inputs are systematically smaller in magnitude, but the coda's RMSNorm + linear transformations can learn to compensate by increasing internal scale. The model ends up in a stable equilibrium:
+
+- Halting head learns to output near-zero `p`
+- ACT mass stays near zero
+- `h_out` has tiny magnitude
+- Coda has internalized a 12× amplification (1/0.083) to recover
+
+This is a **degenerate basin** where adaptive halting has been quietly disabled, but loss has been minimized. The gradient signal that *should* push the halting head to fire (under-magnitude `h_out`) is gradient-equivalent to the coda's internal amplification, so the optimizer has no preference between "use ACT properly" and "kill ACT and let coda compensate." It picks the simpler path.
+
+This is a real architectural bug, not a training-time anti-pattern. Original ACT formulation (Graves 2016) requires unit mass; this implementation provided no mechanism to enforce it at loop termination.
+
+### The fix
+
+In `RecurrentBlock.forward`, force the remainder assignment on the final loop iteration regardless of whether threshold is crossed:
+
+```python
+is_final_loop = t == n_loops - 1
+remainder = (1.0 - cumulative_p).clamp(min=0)
+weight = torch.where(
+    (cumulative_p + p >= self.cfg.act_threshold) | is_final_loop,
+    remainder,
+    p,
+)
+```
+
+Verified via smoke test: with this fix, sum of weights contributing to `h_out` is exactly 1.0 for every token, regardless of halting head behaviour. This removes the architectural escape hatch.
+
+**What the fix does and does not solve:**
+- ✓ Solves: unit-mass correctness — `h_out` always has mass 1.0
+- ✓ Solves: the "kill ACT" gradient escape hatch
+- ✗ Does not solve: ACT may still learn "always halt at the final iteration" (which is fine functionally — depth-8 deterministic with proper output scaling — but doesn't recover *adaptive* halting)
+
+Adaptive halting usefulness is a separate problem, addressable later via ponder loss or training-time depth randomization. Fix the bug first, observe whether useful halting emerges naturally, intervene only if it doesn't.
 
 ### Loss of depth extrapolation — a follow-on consequence of ACT collapse
 

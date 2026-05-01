@@ -837,14 +837,20 @@ class RecurrentBlock(nn.Module):
             p = self.act(h)  # (B, T)
             still_running = ~halted
 
-            # ACT remainder trick: once cumulative_p + p crosses threshold,
-            # assign the remaining probability mass as the final weight.
-            # Gate by still_running so halted positions contribute exactly
-            # once (on the halting step) and zero thereafter — otherwise
-            # threshold<1 leaves a non-zero remainder that leaks every step.
+            # ACT remainder trick: once cumulative_p + p crosses threshold —
+            # OR we've reached the final loop iteration — assign the remaining
+            # probability mass as the final weight. The is_final_loop branch
+            # guarantees h_out has unit ACT mass even for tokens that never
+            # crossed threshold within max_loops; without it, those tokens
+            # leave h_out underweighted (down to mass < 0.1), which the coda
+            # eventually adapts to by amplifying internally — producing a
+            # degenerate basin where the model learns "kill ACT" rather than
+            # "use ACT." Gate by still_running so halted positions contribute
+            # exactly once (on the halting step) and zero thereafter.
+            is_final_loop = t == n_loops - 1
             remainder = (1.0 - cumulative_p).clamp(min=0)
             weight = torch.where(
-                cumulative_p + p >= self.cfg.act_threshold,
+                (cumulative_p + p >= self.cfg.act_threshold) | is_final_loop,
                 remainder,
                 p,
             )
@@ -852,7 +858,7 @@ class RecurrentBlock(nn.Module):
             h_out = h_out + weight.unsqueeze(-1) * h
 
             cumulative_p = cumulative_p + p * still_running.to(dtype=h.dtype)
-            halted = halted | (cumulative_p >= self.cfg.act_threshold)
+            halted = halted | (cumulative_p >= self.cfg.act_threshold) | is_final_loop
 
             # Only short-circuit when there is no KV cache to keep consistent.
             # With a cache, every loop depth must run on every forward pass so
