@@ -86,12 +86,27 @@ def test_act(model, x):
     threshold = model.cfg.act_threshold
     max_loops = model.cfg.max_loop_iters
     cumulative = torch.zeros_like(captured[0])
+    weight_sum = torch.zeros_like(captured[0])
     halt_step = torch.full(cumulative.shape, max_loops, dtype=torch.long)
+    halted = torch.zeros_like(captured[0], dtype=torch.bool)
     for step, p in enumerate(captured):
+        is_final = step == len(captured) - 1
         unset = halt_step == max_loops
         new_halts = (cumulative + p >= threshold) & unset
         halt_step[new_halts] = step
-        cumulative = cumulative + p * unset.to(dtype=p.dtype)
+        # Mirror the model's weight assignment: remainder when threshold
+        # is crossed OR on the final loop (architectural fix).
+        still_running = ~halted
+        remainder = (1.0 - cumulative).clamp(min=0)
+        weight = torch.where(
+            (cumulative + p >= threshold) | is_final,
+            remainder,
+            p,
+        )
+        weight = weight * still_running.to(dtype=p.dtype)
+        weight_sum = weight_sum + weight
+        cumulative = cumulative + p * still_running.to(dtype=p.dtype)
+        halted = halted | (cumulative >= threshold) | is_final
 
     flat = halt_step.flatten().tolist()
     counter = Counter(flat)
@@ -108,14 +123,20 @@ def test_act(model, x):
     avg = sum(s * n for s, n in counter.items()) / total
     print(f"    → mean halt step: {avg:.2f}")
     print(
-        "    → final ACT mass: "
+        "    → cumulative halt p (sum over loops, halting-head behaviour): "
         f"mean={cumulative.mean().item():.4f} "
         f"min={cumulative.min().item():.4f} "
         f"max={cumulative.max().item():.4f}"
     )
+    print(
+        "    → h_out weight mass (sum of weights, output-correctness check): "
+        f"mean={weight_sum.mean().item():.4f} "
+        f"min={weight_sum.min().item():.4f} "
+        f"max={weight_sum.max().item():.4f}"
+    )
     p_all = torch.stack(captured)
     print(
-        "    → halt p: "
+        "    → halt p per iteration: "
         f"mean={p_all.mean().item():.4f} "
         f"min={p_all.min().item():.4f} "
         f"max={p_all.max().item():.4f}"
@@ -123,9 +144,9 @@ def test_act(model, x):
     if avg < 1.5:
         print("    ⚠ ACT collapsed — most tokens halt at the first iteration (no recurrent reasoning)")
     elif avg > max_loops - 0.5:
-        print("    ⚠ ACT never fires — every token uses full depth (halting predictor untrained)")
-    if cumulative.mean().item() < 0.9:
-        print("    ⚠ ACT mass is sub-threshold at train depth — recurrent output is underweighted")
+        print("    ⚠ ACT halting head not useful — every token relies on the final-loop remainder forcing (deterministic depth)")
+    if weight_sum.mean().item() < 0.99 or weight_sum.max().item() > 1.01:
+        print("    ⚠ h_out weight mass is not unity — architectural unit-mass bug present (remainder not forced at final loop)")
 
 
 def test_moe(model, x):

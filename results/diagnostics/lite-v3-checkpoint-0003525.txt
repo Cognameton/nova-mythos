@@ -1,0 +1,60 @@
+loading runs/lite-v3/checkpoint-0003525 ...
+model: 93.5M params  max_loop_iters=8  n_experts=8  topk=2  lora_rank=4
+eval batch: (4, 512) drawn from end of data/corpus/corpus.bin
+
+[1] Loss vs n_loops
+    (lower = better; a flat curve means recurrence isn't earning compute)
+    n_loops |   loss
+    --------+--------
+          1 | 5.4723
+          2 | 5.3418
+          4 | 5.1499
+          8 | 4.9633
+         16 | 5.0438
+    → span across n_loops: 0.5090
+
+[2] ACT halting distribution (threshold=0.99, max_loops=8)
+    halt step | tokens | %
+    ----------+--------+------
+            5 |      1 |   0.0%
+            6 |      9 |   0.4%
+            7 |     11 |   0.5%
+        never |   2027 |  99.0%
+    → mean halt step: 7.98
+    → cumulative halt p (sum over loops, halting-head behaviour): mean=0.2112 min=0.0501 max=1.2858
+    → h_out weight mass (sum of weights, output-correctness check): mean=1.0000 min=1.0000 max=1.0000
+    → halt p per iteration: mean=0.0267 min=0.0000 max=0.5518
+    ⚠ ACT halting head not useful — every token relies on the final-loop remainder forcing (deterministic depth)
+
+[3] MoE routing distribution (8 experts, top-2)
+    expert | routes |   %  | bar
+    -------+--------+------+----
+         6 |  10183 | 31.1% | ########################################
+         1 |   8092 | 24.7% | ###############################
+         0 |   6017 | 18.4% | #######################
+         2 |   5773 | 17.6% | ######################
+         5 |   2031 |  6.2% | #######
+         7 |    380 |  1.2% | #
+         4 |    168 |  0.5% | 
+         3 |    124 |  0.4% | 
+    → balanced load = 12.5%/expert; top expert = 31.1%; used = 8/8
+
+[4] LTI injection: h_{t+1} = A·h_t + B·e + transformer_out
+    A diag — min=0.2993  median=0.3140  max=0.3278
+    A < 0.05 (state forgotten each step) :   0.0% of channels
+    A > 0.95 (state nearly preserved)    :   0.0% of channels
+    B    — min=0.0938  median=0.1001  max=0.1035
+
+[5] LoRA per-loop scale (8 loops × rank 4)
+    loop | ‖scale‖ | cos(loop_0)
+    -----+---------+------------
+       0 |  0.1835 | +1.0000
+       1 |  0.0998 | +0.3912
+       2 |  0.0901 | -0.0501
+       3 |  0.1159 | -0.3968
+       4 |  0.1077 | -0.5042
+       5 |  0.1548 | -0.5487
+       6 |  0.1561 | -0.0629
+       7 |  0.1046 | +0.9143
+
+done.
